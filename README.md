@@ -1,0 +1,49 @@
+# mermaid_local_version
+
+本地 Mermaid 编辑器：双击即用，**保存直接写回你打开的那个文件**，不下载、不联网存盘。
+用 Mermaid v12 + ELK 布局，子图（`subgraph`）会当成真正的容器横排，不会像 Typora / VS Code
+里的旧版 dagre 那样一路往下堆。
+
+## 为什么有这个项目
+
+现有笔记软件内置的 Mermaid 版本太旧、布局低效，工作流图很快就超过一屏。
+这个页面直接加载 Mermaid v12（默认 ELK），专门用来看/改本地的 `.md`、`.mmd` 图。
+
+另外解决两个实际问题：
+
+1. **保存落到“下载”文件夹**：默认浏览器（QQ 浏览器）没有 File System Access API，
+   于是改成由本地 Node 服务直接写盘，与浏览器内核无关。
+2. **语法错误框堆叠盖满页面**：`mermaid.render()` 未给容器参数时，失败的错误图会挂到
+   `<body>` 上越积越多；现在改为离屏渲染 + 失败清理，只留一行提示，并保留上一张好图。
+
+## 快速开始
+
+```bat
+:: Windows：双击 editor\启动.cmd 即可；也可以把 .md 拖到它图标上直接打开
+node editor\serve.js 8787
+```
+
+然后浏览器打开 <http://127.0.0.1:8787/>，点「打开文件」选一个 `.md` / `.mmd`，
+左边改、右边自动重绘，`Ctrl+S` 写回原文件。
+
+## 目录
+
+```
+editor/
+├─ 启动.cmd      ← 入口（起本地服务并打开浏览器）
+├─ serve.js      ← 本地服务：静态页 + 读文件 + 写文件（node，零依赖）
+├─ index.html    ← 全部界面与逻辑，单文件
+└─ README.md     ← 详细用法与已知限制
+img/             ← 效果截图
+样例_make-video.md / 字符诊断.md   ← 示例文档
+```
+
+安全边界：服务只监听 `127.0.0.1`，只允许读写本仓库目录内的文本文件（`.md` `.mmd`
+`.markdown` `.mermaid` `.txt`），越界返回 403。
+
+## 已知限制
+
+- Mermaid 本体从 `cdn.jsdelivr.net` 加载，首次打开需要能访问该 CDN（之后走浏览器缓存）。
+- 必须通过 `启动.cmd`（本地服务）打开；直接双击 `index.html` 读不到也存不了盘。
+
+详细说明见 [editor/README.md](editor/README.md)。
