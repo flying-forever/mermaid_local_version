@@ -214,7 +214,11 @@ function serveStatic(req, res, rel) {
   if (!file.startsWith(EDITOR_DIR)) { res.writeHead(403); return res.end('forbidden'); }
   fs.readFile(file, (err, buf) => {
     if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('404 ' + rel); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+    const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+    const head = { 'Content-Type': type };
+    // 页面本身不缓存：升级后刷新就能拿到新的 index.html，不会卡在旧界面
+    if (type.startsWith('text/html')) head['Cache-Control'] = 'no-store';
+    res.writeHead(200, head);
     res.end(buf);
   });
 }
