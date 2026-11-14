@@ -118,6 +118,28 @@
   .dlg-foot .spacer { flex: 1; }
   .dlg-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
   .dlg-body input { cursor: text; font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+  /* 未连上本地服务时的横幅 */
+  #offline {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+    padding: 9px 16px; font-size: 12.5px; line-height: 1.65;
+    background: #fff6e8; color: #7a4b00; border-bottom: 1px solid #f0dcc0;
+  }
+  #offline b { color: #b3541e; font-size: 13px; }
+  #offline span.tip { color: #8a6a3a; }
+  #offline a {
+    color: #fff; background: #0b6b6b; text-decoration: none;
+    padding: 3px 10px; border-radius: 5px; font-weight: 600;
+  }
+  #offline a:hover { background: #095454; }
+  #offline .kbd {
+    background: #fff; border: 1px solid #e0cda8; border-radius: 4px;
+    padding: 0 5px; font-family: "Cascadia Mono", Consolas, monospace;
+  }
+  #offline.stopped { background: #eef4f4; color: #365050; border-bottom-color: #d8e4e4; }
+  #offline.stopped b { color: #2c6b6b; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  #stopBtn { color: #a3403f; }
+  #stopBtn:hover { background: #fdf0ef; border-color: #e0b4b3; }
 </style>
 </head>
 <body>
@@ -126,6 +148,7 @@
   <button id="saveBtn" title="Ctrl+S 直接写回磁盘">保存</button>
   <button id="saveAsBtn" title="Ctrl+Shift+S">另存为</button>
   <button id="reloadBtn" title="丢弃未保存修改，重新从磁盘读取">重载</button>
+  <button id="stopBtn" title="停止本地服务（停完就可以关掉命令行窗口）" hidden>停止服务</button>
   <select id="layoutSel" title="布局引擎">
     <option value="elk">布局：ELK（推荐）</option>
     <option value="dagre">布局：Dagre（旧）</option>
@@ -140,6 +163,7 @@
   <span id="dirty" hidden>● 未保存</span>
   <span id="status"></span>
 </header>
+<div id="offline" hidden></div>
 <main>
   <textarea id="editor" spellcheck="false" placeholder="点「打开文件」加载 .md / .mmd，或直接在此粘贴 Mermaid 代码"></textarea>
   <div id="preview"></div>
@@ -189,9 +213,14 @@ const pathLabel = $('pathLabel');
 const dirtyEl = $('dirty');
 const layoutSel = $('layoutSel');
 const themeSel = $('themeSel');
+const offlineEl = $('offline');
+const stopBtn = $('stopBtn');
 
 const LS_PATH = 'mermaid-editor:last-path';
 const LS_DIR = 'mermaid-editor:last-dir';
+const LS_ORIGIN = 'mermaid-editor:last-origin';
+
+let serverMode = false;            // 是否连上了 启动.cmd 起的本地服务
 
 let root = '';
 let currentPath = '';
@@ -234,8 +263,55 @@ function setStatus(msg, bad = false, ms = 4000) {
   if (msg) setStatus._t = setTimeout(() => { statusEl.textContent = ''; }, ms);
 }
 
-function setDirty(v) {
-  dirty = v;
+/* ---------------- 与本地服务的连接状态 ---------------- */
+
+const FILE_BUTTONS = ['openBtn', 'saveBtn', 'saveAsBtn', 'reloadBtn'];
+
+function rememberTips() {
+  for (const id of FILE_BUTTONS) $(id).dataset.tip = $(id).title;
+}
+
+function setFileButtons(enabled) {
+  for (const id of FILE_BUTTONS) {
+    const b = $(id);
+    b.disabled = !enabled;
+    b.title = enabled ? (b.dataset.tip || '') : '需要本地服务：先双击 启动.cmd';
+  }
+}
+
+// 连不上服务时的横幅：说清原因，并给一个能点的入口
+function markOffline(reason, stopped = false) {
+  serverMode = false;
+  stopBtn.hidden = true;
+  setFileButtons(false);
+
+  const origin = localStorage.getItem(LS_ORIGIN) || 'http://127.0.0.1:8787';
+  const short = origin.replace(/^https?:\/\//, '');
+  offlineEl.className = stopped ? 'stopped' : '';
+  offlineEl.innerHTML = stopped
+    ? '<b>本地服务已停止</b><span class="tip">可以关掉这个页面和那个命令行窗口了；' +
+      '下次要用，双击 <span class="kbd">启动.cmd</span>。</span>'
+    : '<b>未连接本地服务</b><span class="tip">' + reason +
+      '。打开、保存、浏览目录都要靠 <span class="kbd">启动.cmd</span> 起的本地服务，' +
+      '直接双击 index.html 时浏览器不允许页面碰磁盘。</span>' +
+      '<a href="' + origin + '/">在本地服务里打开 ' + short + '</a>';
+  offlineEl.hidden = false;
+}
+
+async function stopService() {
+  if (!confirm('停止本地服务？\n\n停完这个页面就不能再打开或保存文件了；下次要用，双击 启动.cmd。')) return;
+  try {
+    await fetch('/api/shutdown', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+  } catch { /* 服务先退出、连接被断开是正常现象 */ }
+  setStatus('服务已停止', true, 10000);
+  markOffline('', true);
+}
+
+function setDirty(v) {  dirty = v;
   dirtyEl.hidden = !v;
   document.title = (v ? '● ' : '') + 'Mermaid 本地编辑器';
 }
@@ -255,7 +331,12 @@ async function api(pathname, body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   };
-  const res = await fetch(pathname, opt);
+  const res = await fetch(pathname, opt).catch(() => {
+    markOffline(location.protocol === 'file:'
+      ? '当前页面是以文件方式（file://）打开的'
+      : '和本地服务的连接断了');
+    throw new Error('连不上本地服务');
+  });
   let data = null;
   try { data = await res.json(); } catch { /* 非 JSON */ }
   if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
@@ -475,11 +556,13 @@ async function saveTo(absPath) {
 }
 
 async function saveFile() {
+  if (!serverMode) { setStatus('需要本地服务：先双击 启动.cmd', true, 6000); return; }
   if (!currentPath) return saveAs();
   await saveTo(currentPath);
 }
 
 async function saveAs() {
+  if (!serverMode) { setStatus('需要本地服务：先双击 启动.cmd', true, 6000); return; }
   const def = currentPath || (root ? root + '\\untitled.md' : 'untitled.md');
   const p = await askPath('另存为', def);
   if (!p) return;
@@ -499,6 +582,10 @@ async function reload() {
 let modalDir = '';
 
 async function openBrowser(startDir) {
+  if (!serverMode) {
+    setStatus('需要本地服务：先双击 启动.cmd', true, 6000);
+    return;
+  }
   $('fileModal').hidden = false;
   $('rootHint').textContent = root ? root : '';
   await listDir(startDir || localStorage.getItem(LS_DIR) || '');
@@ -662,6 +749,7 @@ $('openBtn').onclick = () => openBrowser();
 $('saveBtn').onclick = saveFile;
 $('saveAsBtn').onclick = saveAs;
 $('reloadBtn').onclick = reload;
+$('stopBtn').onclick = stopService;
 $('fmClose').onclick = () => { $('fileModal').hidden = true; };
 $('fmNew').onclick = createAndOpen;
 $('newName').onkeydown = e => { if (e.key === 'Enter') createAndOpen(); };
@@ -710,11 +798,27 @@ const SAMPLE = `flowchart LR
   class D gate`;
 
 (async function init() {
-  try { root = (await api('/api/root')).root || ''; } catch { /* 非 server 模式 */ }
+  rememberTips();
+
+  if (location.protocol === 'file:') {
+    markOffline('当前页面是以文件方式（file://）打开的');
+  } else {
+    try {
+      await api('/api/ping');
+      root = (await api('/api/root')).root || '';
+      serverMode = true;
+      setFileButtons(true);
+      offlineEl.hidden = true;
+      stopBtn.hidden = false;
+      localStorage.setItem(LS_ORIGIN, location.origin);
+    } catch {
+      markOffline('和本地服务的连接断了');
+    }
+  }
 
   const q = new URLSearchParams(location.search).get('file');
   const last = localStorage.getItem(LS_PATH) || '';
-  const target = q || last;
+  const target = serverMode ? (q || last) : '';
   let opened = false;
 
   if (target) opened = await loadPath(target);
@@ -724,7 +828,7 @@ const SAMPLE = `flowchart LR
     editor.value = SAMPLE;
     lastRendered = null;
     await render(true);
-    if (q) setStatus('打不开 ' + q, true, 8000);
+    if (q && serverMode) setStatus('打不开 ' + q, true, 8000);
   }
   editor.focus();
 })();

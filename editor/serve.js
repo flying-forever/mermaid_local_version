@@ -142,6 +142,38 @@ async function apiSave(res, body) {
   }
 }
 
+/* ---------- 生命周期：停止服务 / 重复启动 ---------- */
+
+// 只接受编辑器页面自己的请求（跨站 POST 送 JSON 本来就会触发预检失败，这里再兜一层）
+function sameOrigin(req) {
+  const o = req.headers.origin;
+  if (!o) return true;                                   // curl / node 直接调用
+  return o === 'http://127.0.0.1:' + PORT ||
+         o === 'http://localhost:' + PORT ||
+         o === 'http://[::1]:' + PORT;
+}
+
+function stopServer(code = 0) {
+  console.log('[stop] 收到停止请求，服务退出');
+  server.close(() => process.exit(code));
+  setTimeout(() => process.exit(code), 1000).unref();    // 还有 keep-alive 连接时兜底
+}
+
+// 端口被占用时，先确认是不是“已经跑着一个本服务”
+function probeRunning() {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port: PORT, path: '/api/ping', timeout: 900 }, res => {
+      let s = '';
+      res.on('data', d => (s += d));
+      res.on('end', () => {
+        try { const j = JSON.parse(s); resolve(j && j.ok ? j : null); } catch { resolve(null); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
 /* ---------- 静态文件 ---------- */
 
 const MIME = {
@@ -181,6 +213,14 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/read' && req.method === 'POST') return await apiRead(res, await readBody(req));
     if (p === '/api/save' && req.method === 'POST') return await apiSave(res, await readBody(req));
     if (p === '/api/root') return sendJson(res, 200, { root: DOC_ROOT, editor: EDITOR_DIR });
+    if (p === '/api/ping') {
+      return sendJson(res, 200, { ok: true, pid: process.pid, port: PORT, root: DOC_ROOT });
+    }
+    if (p === '/api/shutdown' && req.method === 'POST') {
+      if (!sameOrigin(req)) return sendJson(res, 403, { error: '只接受编辑器页面自己的请求' });
+      sendJson(res, 200, { ok: true, message: '服务正在停止' });
+      return setTimeout(() => stopServer(0), 150);
+    }
     if (p.startsWith('/api/')) return sendJson(res, 404, { error: '未知接口 ' + p });
     return serveStatic(req, res, p === '/' ? '/index.html' : decodeURIComponent(p));
   } catch (e) {
@@ -189,23 +229,43 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+function editorUrl() {
+  let url = 'http://127.0.0.1:' + PORT + '/';
+  if (OPEN_ARG) url += '?file=' + encodeURIComponent(path.resolve(OPEN_ARG));
+  return url;
+}
+
+function openPage(url) {
+  if (process.env.MMD_NO_OPEN) return;          // 无界面环境/测试用：只起服务不拉浏览器
+  require('child_process')
+    .spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' })
+    .unref();
+}
+
 server.on('error', err => {
   if (err.code === 'EADDRINUSE') {
-    console.error('端口 ' + PORT + ' 已被占用。改用其它端口：node serve.js 8788');
-    process.exit(1);
+    // 很可能是重复双击了 启动.cmd：确认是老朋友就直接打开它，不报错
+    probeRunning().then(j => {
+      if (j && j.root) {
+        console.log('端口 ' + PORT + ' 上已经有编辑器服务在运行（pid ' + j.pid + '），直接打开它。');
+        console.log('要停掉它：页面右上角「停止服务」，或双击 停止.cmd');
+        openPage(editorUrl());
+        setTimeout(() => process.exit(0), 500);
+      } else {
+        console.error('端口 ' + PORT + ' 被其它程序占用了。换一个端口：node serve.js 8788');
+        process.exit(1);
+      }
+    });
+    return;
   }
   throw err;
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  let url = 'http://127.0.0.1:' + PORT + '/';
-  if (OPEN_ARG) {
-    const abs = path.resolve(OPEN_ARG);
-    url += '?file=' + encodeURIComponent(abs);
-    console.log('待打开文件: ' + abs);
-  }
+  const url = editorUrl();
+  if (OPEN_ARG) console.log('待打开文件: ' + path.resolve(OPEN_ARG));
   console.log('Mermaid 本地编辑器: ' + url);
   console.log('文档根目录: ' + DOC_ROOT);
-  console.log('按 Ctrl+C 停止');
-  require('child_process').spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+  console.log('停止：页面右上角「停止服务」，或双击 停止.cmd，或 Ctrl+C');
+  openPage(url);
 });
