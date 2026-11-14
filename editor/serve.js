@@ -14,6 +14,9 @@ const PORT = Number(process.argv[2] || 8787);
 const OPEN_ARG = process.argv[3] === 'noopen' ? ''
   : (process.argv[3] || '').trim().replace(/^"+|"+$/g, '');
 const MAX_BODY = 32 * 1024 * 1024;
+// 页面与本服务之间的接口协议号：/api/ping 会把它报出去，
+// 页面据此判断“端口上跑的是不是旧版本”，避免升级后老进程卡住新页面。
+const PROTO = 2;
 
 const TEXT_EXT = new Set(['.md', '.mmd', '.markdown', '.mermaid', '.txt']);
 
@@ -159,19 +162,37 @@ function stopServer(code = 0) {
   setTimeout(() => process.exit(code), 1000).unref();    // 还有 keep-alive 连接时兜底
 }
 
-// 端口被占用时，先确认是不是“已经跑着一个本服务”
-function probeRunning() {
+// 端口被占用时，先弄清占用者是谁：本服务（新版）/ 本服务（旧版）/ 别的东西
+function httpGetText(pathname, timeout = 900) {
   return new Promise(resolve => {
-    const req = http.get({ host: '127.0.0.1', port: PORT, path: '/api/ping', timeout: 900 }, res => {
+    const req = http.get({ host: '127.0.0.1', port: PORT, path: pathname, timeout }, res => {
       let s = '';
       res.on('data', d => (s += d));
-      res.on('end', () => {
-        try { const j = JSON.parse(s); resolve(j && j.ok ? j : null); } catch { resolve(null); }
-      });
+      res.on('end', () => resolve({ status: res.statusCode, body: s }));
     });
     req.on('timeout', () => { req.destroy(); resolve(null); });
     req.on('error', () => resolve(null));
   });
+}
+
+async function probePort() {
+  const ping = await httpGetText('/api/ping');
+  if (ping && ping.status === 200) {
+    try {
+      const j = JSON.parse(ping.body);
+      if (j && j.ok) return { kind: 'mine', pid: j.pid, proto: Number(j.proto) || 1, root: j.root };
+    } catch { /* 落到下面继续判断 */ }
+  }
+  // 没有 /api/ping：看看这个端口是不是还在吐本编辑器的老页面
+  const home = await httpGetText('/', 1200);
+  if (home && home.status === 200 && home.body.includes('Mermaid 本地编辑器')) {
+    return { kind: 'legacy', pid: null };
+  }
+  return { kind: 'other', pid: null };
+}
+
+function portHint() {
+  return '停掉它：双击 停止.cmd，或 node editor/stop.js ' + PORT + '，或关掉它的命令行窗口。';
 }
 
 /* ---------- 静态文件 ---------- */
@@ -214,7 +235,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/save' && req.method === 'POST') return await apiSave(res, await readBody(req));
     if (p === '/api/root') return sendJson(res, 200, { root: DOC_ROOT, editor: EDITOR_DIR });
     if (p === '/api/ping') {
-      return sendJson(res, 200, { ok: true, pid: process.pid, port: PORT, root: DOC_ROOT });
+      return sendJson(res, 200, {
+        ok: true, name: 'mermaid-local-editor',
+        proto: PROTO, pid: process.pid, port: PORT, root: DOC_ROOT
+      });
     }
     if (p === '/api/shutdown' && req.method === 'POST') {
       if (!sameOrigin(req)) return sendJson(res, 403, { error: '只接受编辑器页面自己的请求' });
@@ -242,20 +266,30 @@ function openPage(url) {
     .unref();
 }
 
-server.on('error', err => {
+server.on('error', async err => {
   if (err.code === 'EADDRINUSE') {
-    // 很可能是重复双击了 启动.cmd：确认是老朋友就直接打开它，不报错
-    probeRunning().then(j => {
-      if (j && j.root) {
-        console.log('端口 ' + PORT + ' 上已经有编辑器服务在运行（pid ' + j.pid + '），直接打开它。');
-        console.log('要停掉它：页面右上角「停止服务」，或双击 停止.cmd');
-        openPage(editorUrl());
-        setTimeout(() => process.exit(0), 500);
-      } else {
-        console.error('端口 ' + PORT + ' 被其它程序占用了。换一个端口：node serve.js 8788');
-        process.exit(1);
-      }
-    });
+    const info = await probePort();
+    if (info.kind === 'mine' && info.proto >= PROTO) {
+      // 重复双击了 启动.cmd：确认是老朋友就直接打开它，不报错
+      console.log('端口 ' + PORT + ' 上已经有编辑器服务在运行（pid ' + info.pid + '），直接打开它。');
+      console.log('要停掉它：页面右上角「停止服务」，或双击 停止.cmd');
+      openPage(editorUrl());
+      return setTimeout(() => process.exit(0), 500);
+    }
+    if (info.kind === 'mine') {
+      console.error('端口 ' + PORT + ' 上的编辑器服务是旧版本（接口协议 ' + info.proto +
+        '，当前需要 ' + PROTO + '，pid ' + info.pid + '）。');
+      console.error(portHint());
+      return process.exit(1);
+    }
+    if (info.kind === 'legacy') {
+      console.error('端口 ' + PORT + ' 上跑的是旧版本的编辑器服务（没有 /api/ping，是升级前起的进程）。');
+      console.error(portHint());
+      return process.exit(1);
+    }
+    console.error('端口 ' + PORT + ' 被其它程序占用了。换一个端口：把 启动.cmd 里的 8787 改成 8788，');
+    console.error('或手动：node editor/serve.js 8788');
+    process.exit(1);
     return;
   }
   throw err;
