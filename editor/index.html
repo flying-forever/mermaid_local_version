@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Mermaid 本地编辑器</title>
+<style>
+  :root {
+    --bg: #f5f7f8; --panel: #ffffff; --ink: #1d2734; --muted: #6b7a8c;
+    --line: #dce3e9; --accent: #0f766e; --danger: #b42318;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--ink); background: var(--bg); display: flex; flex-direction: column;
+  }
+  [hidden] { display: none !important; }
+  header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex-wrap: nowrap;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  button, select, input {
+    font: inherit; padding: 5px 10px; border: 1px solid var(--line); background: #fff;
+    color: var(--ink); border-radius: 6px; cursor: pointer;
+  }
+  input { cursor: text; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #0c5f59; color: #fff; }
+  #pathLabel {
+    color: var(--muted); font-size: 12px; margin-left: auto; max-width: 42%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
+  }
+  #dirty { font-size: 12px; color: #b25c00; }
+  #status { font-size: 12px; color: var(--accent); min-width: 130px; max-width: 320px;
+            text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.bad { color: var(--danger); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #editor {
+    width: 46%; min-width: 240px; padding: 14px 16px; border: 0; outline: none;
+    border-right: 1px solid var(--line); background: #fcfdfd; color: var(--ink);
+    font: 13px/1.65 "Cascadia Mono", Consolas, "Microsoft YaHei", monospace;
+    resize: none; tab-size: 2;
+  }
+  #preview { flex: 1; overflow: auto; padding: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 16px; overflow: auto;
+  }
+  .cap { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .cap .spacer { flex: 1; }
+  .cap button { padding: 2px 8px; font-size: 12px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .svgbox svg { max-width: 100%; height: auto; }
+
+  /* 单行错误/警告条：默认一行省略号，点“详情”才展开，绝不撑满整页 */
+  .notice {
+    display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.5;
+    padding: 6px 10px; border-radius: 8px; border: 1px solid; margin-bottom: 8px;
+  }
+  .notice .ni { flex: none; font-weight: 700; }
+  .notice .nt {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .notice.open .nt {
+    white-space: pre-wrap; word-break: break-word; max-height: 132px; overflow: auto;
+    font: 12px/1.6 "Cascadia Mono", Consolas, monospace;
+  }
+  .notice .nd {
+    flex: none; border: 0; background: none; padding: 0 2px; font-size: 12px;
+    color: inherit; text-decoration: underline;
+  }
+  .notice.err { background: #fdf2f0; border-color: #f3c9c2; color: var(--danger); }
+  .notice.warn { background: #fff8e6; border-color: #f0d9a0; color: #8a5a00; }
+  .notice.hint { background: #f4f7f9; border-color: var(--line); color: var(--muted); }
+
+  /* 离屏渲染台：mermaid 的临时节点全落在这里，失败残留也看不见 */
+  .stage {
+    position: fixed; left: -30000px; top: 0; width: 1200px; height: 1200px;
+    overflow: hidden; opacity: 0; pointer-events: none;
+  }
+
+  .modal {
+    position: fixed; inset: 0; background: rgba(20, 30, 40, .38);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  .dlg {
+    background: var(--panel); border-radius: 12px; width: min(680px, 92vw);
+    max-height: 82vh; display: flex; flex-direction: column;
+    box-shadow: 0 18px 48px rgba(16, 24, 40, .22);
+  }
+  .dlg.small { width: min(560px, 92vw); }
+  .dlg-head {
+    display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .dlg-head .hint { margin-left: auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dlg-head .x { border: 0; background: none; font-size: 18px; line-height: 1; padding: 2px 6px; color: var(--muted); }
+  .pathbar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line);
+    font-size: 12px; color: var(--muted);
+  }
+  #crumb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flist { overflow: auto; padding: 6px; min-height: 120px; }
+  .frow {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    border: 0; background: none; padding: 7px 10px; border-radius: 7px; cursor: pointer;
+    font: 13px/1.4 inherit; color: var(--ink);
+  }
+  .frow:hover { background: #eef4f4; color: var(--ink); }
+  .frow .fi { width: 16px; flex: none; opacity: .75; }
+  .frow .fn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .frow .fm { flex: none; font-size: 11px; color: var(--muted); }
+  .dlg-foot {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line);
+  }
+  .dlg-foot .spacer { flex: 1; }
+  .dlg-body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .dlg-body input { cursor: text; font-family: "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <button class="primary" id="openBtn" title="Ctrl+O">打开文件</button>
+  <button id="saveBtn" title="Ctrl+S 直接写回磁盘">保存</button>
+  <button id="saveAsBtn" title="Ctrl+Shift+S">另存为</button>
+  <button id="reloadBtn" title="丢弃未保存修改，重新从磁盘读取">重载</button>
+  <select id="layoutSel" title="布局引擎">
+    <option value="elk">布局：ELK（推荐）</option>
+    <option value="dagre">布局：Dagre（旧）</option>
+  </select>
+  <select id="themeSel" title="主题">
+    <option value="default">主题：浅色</option>
+    <option value="dark">主题：深色</option>
+    <option value="forest">主题：森林</option>
+    <option value="neutral">主题：中性</option>
+  </select>
+  <span id="pathLabel">未打开文件</span>
+  <span id="dirty" hidden>● 未保存</span>
+  <span id="status"></span>
+</header>
+<main>
+  <textarea id="editor" spellcheck="false" placeholder="点「打开文件」加载 .md / .mmd，或直接在此粘贴 Mermaid 代码"></textarea>
+  <div id="preview"></div>
+</main>
+
+<div class="modal" id="fileModal" hidden>
+  <div class="dlg">
+    <div class="dlg-head">
+      <b>打开文件</b>
+      <span class="hint" id="rootHint"></span>
+      <button class="x" id="fmClose" title="关闭">×</button>
+    </div>
+    <div class="pathbar">
+      <button id="fmUp" title="上一级">↑</button>
+      <span id="crumb"></span>
+    </div>
+    <div class="flist" id="flist"></div>
+    <div class="dlg-foot">
+      <input id="newName" placeholder="新建文件名，如 plan.md" style="flex:1">
+      <button id="fmNew">新建并打开</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="pathModal" hidden>
+  <div class="dlg small">
+    <div class="dlg-head"><b id="pmTitle">另存为</b><button class="x" id="pmClose">×</button></div>
+    <div class="dlg-body">
+      <label class="hint">完整路径（可写盘符绝对路径，也可写相对文档根目录的路径）</label>
+      <input id="pmInput" spellcheck="false">
+      <div class="hint" id="pmHint"></div>
+    </div>
+    <div class="dlg-foot">
+      <span class="spacer"></span>
+      <button id="pmCancel">取消</button>
+      <button class="primary" id="pmOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const editor = $('editor');
+const preview = $('preview');
+const statusEl = $('status');
+const pathLabel = $('pathLabel');
+const dirtyEl = $('dirty');
+const layoutSel = $('layoutSel');
+const themeSel = $('themeSel');
+
+const LS_PATH = 'mermaid-editor:last-path';
+const LS_DIR = 'mermaid-editor:last-dir';
+
+let root = '';
+let currentPath = '';
+let dirty = false;
+let mermaid = null;
+let engineError = '';
+let renderToken = 0;
+let renderSeq = 0;
+let debounceTimer = null;
+let lastRendered = null;
+const lastGoodSvg = new Map();     // 代码块序号 -> 上一次成功渲染的 SVG
+
+let enginePromise = null;
+
+// 延迟加载渲染引擎：CDN 卡住/断网时页面本身照常可用（打开、保存都不受影响）
+function loadEngine() {
+  if (enginePromise) return enginePromise;
+  enginePromise = (async () => {
+    try {
+      const mod = await Promise.race([
+        import('https://cdn.jsdelivr.net/npm/mermaid@12/+esm'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('加载超时（20 秒）')), 20000))
+      ]);
+      mermaid = mod.default;
+      return true;
+    } catch (e) {
+      engineError = String((e && e.message) || e);
+      return false;
+    }
+  })();
+  return enginePromise;
+}
+
+/* ---------------- 基础工具 ---------------- */
+
+function setStatus(msg, bad = false, ms = 4000) {
+  statusEl.textContent = msg;
+  statusEl.classList.toggle('bad', bad);
+  clearTimeout(setStatus._t);
+  if (msg) setStatus._t = setTimeout(() => { statusEl.textContent = ''; }, ms);
+}
+
+function setDirty(v) {
+  dirty = v;
+  dirtyEl.hidden = !v;
+  document.title = (v ? '● ' : '') + 'Mermaid 本地编辑器';
+}
+
+function showPath(p) {
+  if (!p) { pathLabel.textContent = '未打开文件'; pathLabel.title = ''; return; }
+  const short = root && p.startsWith(root) ? p.slice(root.length).replace(/^[\\/]+/, '') : p;
+  pathLabel.textContent = short || p;
+  pathLabel.title = p;
+}
+
+const timeStr = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
+async function api(pathname, body) {
+  const opt = body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  };
+  const res = await fetch(pathname, opt);
+  let data = null;
+  try { data = await res.json(); } catch { /* 非 JSON */ }
+  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+  return data || {};
+}
+
+/* ---------------- 语法块提取 ---------------- */
+
+function extractBlocks(text) {
+  const blocks = [];
+  const re = /```[ \t]*mermaid[^\n]*\r?\n([\s\S]*?)(?:```|$)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    blocks.push(m[1].replace(/\s+$/, ''));
+    if (m.index === re.lastIndex) re.lastIndex++;   // 防御零宽匹配死循环
+  }
+  if (!blocks.length) {
+    const t = text.trim();
+    if (t && !/```/.test(t)) blocks.push(t);        // 裸 mermaid 文本
+  }
+  return blocks;
+}
+
+/* ---------------- 渲染 ---------------- */
+
+function scheduleRender() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => render(), 350);
+}
+
+function makeCard(i) {
+  const card = document.createElement('section');
+  card.className = 'card';
+  const cap = document.createElement('div');
+  cap.className = 'cap';
+  const title = document.createElement('span');
+  title.textContent = '图 ' + (i + 1);
+  const spacer = document.createElement('span');
+  spacer.className = 'spacer';
+  const bSvg = document.createElement('button');
+  bSvg.textContent = '导出 SVG';
+  const bPng = document.createElement('button');
+  bPng.textContent = '导出 PNG';
+  bSvg.disabled = bPng.disabled = true;
+  cap.append(title, spacer, bSvg, bPng);
+
+  const notice = document.createElement('div');
+  notice.className = 'notice';
+  notice.hidden = true;
+
+  const box = document.createElement('div');
+  box.className = 'svgbox';
+
+  card.append(cap, notice, box);
+  bSvg.onclick = () => exportSvg(box.querySelector('svg'), i);
+  bPng.onclick = () => exportPng(box.querySelector('svg'), i);
+  return { card, box, notice, bSvg, bPng };
+}
+
+function setNotice(card, kind, msg) {
+  const n = card.notice;
+  n.hidden = false;
+  n.className = 'notice ' + kind;
+  n.replaceChildren();
+  const icon = document.createElement('span');
+  icon.className = 'ni';
+  icon.textContent = kind === 'err' ? '!' : kind === 'warn' ? '⚠' : '·';
+  const txt = document.createElement('span');
+  txt.className = 'nt';
+  txt.textContent = '语法错误：' + msg;
+  if (kind === 'hint') txt.textContent = msg;
+  const det = document.createElement('button');
+  det.className = 'nd';
+  det.textContent = '详情';
+  det.onclick = () => n.classList.toggle('open');
+  n.append(icon, txt, det);
+}
+
+function cleanErr(err) {
+  let msg = String((err && err.message) || err || '未知错误');
+  msg = msg.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (msg.length > 800) msg = msg.slice(0, 800) + ' …';
+  return msg;
+}
+
+// mermaid 失败时会在 body 上留下 #d<id> / #<id> 临时节点，必须清掉，否则越堆越大盖住整页
+function sweep(id) {
+  for (const sel of ['d' + id, id]) {
+    const n = document.getElementById(sel);
+    if (n && n.parentElement === document.body) n.remove();
+  }
+  document.querySelectorAll('body > [id^="dmmd"], body > [id^="mmd"]').forEach(n => n.remove());
+  document.querySelectorAll('body > .mermaid-error, body > svg.error-icon').forEach(n => n.remove());
+}
+
+async function renderOne(id, code) {
+  const stage = document.createElement('div');
+  stage.className = 'stage';
+  document.body.appendChild(stage);
+  try {
+    const out = await mermaid.render(id, code, stage);
+    const svg = out && out.svg ? out.svg : '';
+    return { svg, bind: out && out.bindFunctions };
+  } finally {
+    stage.remove();
+    sweep(id);
+  }
+}
+
+async function render(force = false) {
+  clearTimeout(debounceTimer);
+  const text = editor.value;
+  if (!force && text === lastRendered) return;
+  lastRendered = text;
+  const my = ++renderToken;
+
+  const blocks = extractBlocks(text);
+  if (lastGoodSvg.size !== blocks.length) lastGoodSvg.clear();
+  preview.replaceChildren();
+
+  if (!mermaid && !(await loadEngine())) {
+    if (my !== renderToken) return;
+    const card = makeCard(0);
+    setNotice(card, 'err', 'Mermaid 引擎加载失败（需要联网访问 cdn.jsdelivr.net）：' + engineError);
+    preview.append(card.card);
+    return;
+  }
+  if (my !== renderToken) return;
+  if (!blocks.length) {
+    const hint = document.createElement('div');
+    hint.className = 'hint';
+    hint.textContent = '没有找到 ```mermaid 代码块，也没有裸 Mermaid 代码。';
+    preview.append(hint);
+    return;
+  }
+
+  mermaid.initialize({
+    startOnLoad: false,
+    layout: layoutSel.value,
+    theme: themeSel.value,
+    securityLevel: 'loose',
+    fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif',
+    flowchart: { useMaxWidth: true, curve: 'basis' }
+  });
+
+  for (let i = 0; i < blocks.length; i++) {
+    if (my !== renderToken) return;          // 已有更新的渲染请求，放弃本轮
+    const card = makeCard(i);
+    preview.append(card.card);
+    const code = blocks[i];
+
+    if (!code.trim()) {
+      setNotice(card, 'hint', '图 ' + (i + 1) + ' 是空代码块');
+      continue;
+    }
+
+    try {
+      const { svg, bind } = await renderOne('mmd' + (++renderSeq), code);
+      if (my !== renderToken) return;
+      if (!svg) throw new Error('渲染结果为空');
+      card.box.innerHTML = svg;
+      if (typeof bind === 'function') { try { bind(card.box); } catch { /* 忽略 */ } }
+      lastGoodSvg.set(i, svg);
+      card.bSvg.disabled = card.bPng.disabled = false;
+      card.notice.hidden = true;
+    } catch (err) {
+      if (my !== renderToken) return;
+      const msg = cleanErr(err);
+      const good = lastGoodSvg.get(i);
+      if (good) {
+        // 编辑到一半语法不完整时，保留上一张成功的图，只加一条单行提示
+        card.box.innerHTML = good;
+        card.bSvg.disabled = card.bPng.disabled = false;
+        setNotice(card, 'warn', msg + '\n（右侧仍是上一次成功渲染的结果）');
+      } else {
+        setNotice(card, 'err', msg);
+      }
+    }
+  }
+}
+
+/* ---------------- 文件读写 ---------------- */
+
+async function loadPath(absPath) {
+  try {
+    const d = await api('/api/read', { path: absPath });
+    editor.value = d.text;
+    currentPath = d.path;
+    showPath(d.path);
+    setDirty(false);
+    lastRendered = null;
+    lastGoodSvg.clear();
+    localStorage.setItem(LS_PATH, d.path);
+    localStorage.setItem(LS_DIR, d.path.replace(/[\\/][^\\/]*$/, ''));
+    await render(true);
+    setStatus('已打开 ' + (d.rel || d.path).split(/[\\/]/).pop());
+    return true;
+  } catch (e) {
+    setStatus('打开失败：' + e.message, true, 8000);
+    return false;
+  }
+}
+
+async function saveTo(absPath) {
+  try {
+    const d = await api('/api/save', { path: absPath, text: editor.value });
+    currentPath = d.path;
+    showPath(d.path);
+    setDirty(false);
+    localStorage.setItem(LS_PATH, d.path);
+    setStatus('已写回磁盘 ' + timeStr());
+    return true;
+  } catch (e) {
+    setStatus('保存失败：' + e.message, true, 9000);
+    return false;
+  }
+}
+
+async function saveFile() {
+  if (!currentPath) return saveAs();
+  await saveTo(currentPath);
+}
+
+async function saveAs() {
+  const def = currentPath || (root ? root + '\\untitled.md' : 'untitled.md');
+  const p = await askPath('另存为', def);
+  if (!p) return;
+  const abs = /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('\\\\') || p.startsWith('/')
+    ? p : (root ? root + '\\' + p : p);
+  await saveTo(abs);
+}
+
+async function reload() {
+  if (!currentPath) return;
+  if (dirty && !confirm('磁盘内容会覆盖当前编辑，继续？')) return;
+  await loadPath(currentPath);
+}
+
+/* ---------------- 打开文件对话框 ---------------- */
+
+let modalDir = '';
+
+async function openBrowser(startDir) {
+  $('fileModal').hidden = false;
+  $('rootHint').textContent = root ? root : '';
+  await listDir(startDir || localStorage.getItem(LS_DIR) || '');
+}
+
+async function listDir(dir) {
+  const flist = $('flist');
+  flist.replaceChildren();
+  try {
+    const d = await api('/api/list?dir=' + encodeURIComponent(dir || ''));
+    modalDir = d.dir;
+    $('crumb').textContent = d.dir;
+    $('crumb').title = d.dir;
+    $('fmUp').disabled = !d.parent;
+    $('fmUp').onclick = () => d.parent && listDir(d.parent);
+    if (!d.entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hint';
+      empty.style.padding = '18px 12px';
+      empty.textContent = '这个目录里没有 .md / .mmd / .txt 文件';
+      flist.append(empty);
+    }
+    for (const e of d.entries) {
+      const row = document.createElement('button');
+      row.className = 'frow';
+      const icon = document.createElement('span');
+      icon.className = 'fi';
+      icon.textContent = e.dir ? '📁' : '📄';
+      const name = document.createElement('span');
+      name.className = 'fn';
+      name.textContent = e.name;
+      row.append(icon, name);
+      if (!e.dir && e.mtime) {
+        const meta = document.createElement('span');
+        meta.className = 'fm';
+        meta.textContent = new Date(e.mtime).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        row.append(meta);
+      }
+      row.onclick = () => {
+        if (e.dir) return listDir(e.path);
+        $('fileModal').hidden = true;
+        loadPath(e.path);
+      };
+      flist.append(row);
+    }
+  } catch (e) {
+    const bad = document.createElement('div');
+    bad.className = 'notice err';
+    bad.textContent = '列目录失败：' + e.message;
+    flist.append(bad);
+  }
+}
+
+async function createAndOpen() {
+  const name = $('newName').value.trim();
+  if (!name) return;
+  if (!/\.(md|mmd|markdown|txt|mermaid)$/i.test(name)) return setStatus('文件名需要 .md 或 .mmd 后缀', true);
+  const abs = modalDir + '\\' + name;
+  editor.value = '';
+  if (await saveTo(abs)) {
+    $('fileModal').hidden = true;
+    $('newName').value = '';
+    setDirty(false);
+    await render(true);
+  }
+}
+
+/* ---------------- 路径输入框 ---------------- */
+
+function askPath(title, def) {
+  return new Promise(resolve => {
+    const modal = $('pathModal');
+    $('pmTitle').textContent = title;
+    $('pmInput').value = def;
+    $('pmHint').textContent = root ? '文档根目录：' + root : '';
+    modal.hidden = false;
+    const input = $('pmInput');
+    input.focus();
+    input.select();
+
+    const done = v => {
+      modal.hidden = true;
+      cleanup();
+      resolve(v);
+    };
+    const onOk = () => done(input.value.trim() || null);
+    const onCancel = () => done(null);
+    const onKey = e => {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    const cleanup = () => {
+      $('pmOk').onclick = null;
+      $('pmCancel').onclick = null;
+      $('pmClose').onclick = null;
+      input.onkeydown = null;
+    };
+    $('pmOk').onclick = onOk;
+    $('pmCancel').onclick = onCancel;
+    $('pmClose').onclick = onCancel;
+    input.onkeydown = onKey;
+  });
+}
+
+/* ---------------- 导出 ---------------- */
+
+function baseName() {
+  const n = currentPath ? currentPath.split(/[\\/]/).pop() : 'diagram';
+  return n.replace(/\.[^.]+$/, '') || 'diagram';
+}
+
+function download(name, text, mime = 'text/plain;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
+function exportSvg(svgEl, i) {
+  if (!svgEl) return;
+  const src = new XMLSerializer().serializeToString(svgEl.cloneNode(true));
+  download(baseName() + '-' + (i + 1) + '.svg', src, 'image/svg+xml;charset=utf-8');
+}
+
+function exportPng(svgEl, i) {
+  if (!svgEl) return;
+  const clone = svgEl.cloneNode(true);
+  const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+  const rect = svgEl.getBoundingClientRect();
+  const w = (vb && vb.width) || Math.ceil(rect.width) || 1200;
+  const h = (vb && vb.height) || Math.ceil(rect.height) || 800;
+  const src = new XMLSerializer().serializeToString(clone);
+  const url = URL.createObjectURL(new Blob([src], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(w * 2);
+    c.height = Math.ceil(h * 2);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    c.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = baseName() + '-' + (i + 1) + '.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    }, 'image/png');
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); setStatus('PNG 导出失败', true); };
+  img.src = url;
+}
+
+/* ---------------- 事件绑定 ---------------- */
+
+$('openBtn').onclick = () => openBrowser();
+$('saveBtn').onclick = saveFile;
+$('saveAsBtn').onclick = saveAs;
+$('reloadBtn').onclick = reload;
+$('fmClose').onclick = () => { $('fileModal').hidden = true; };
+$('fmNew').onclick = createAndOpen;
+$('newName').onkeydown = e => { if (e.key === 'Enter') createAndOpen(); };
+$('fileModal').onclick = e => { if (e.target === $('fileModal')) $('fileModal').hidden = true; };
+$('pathModal').onclick = e => { if (e.target === $('pathModal')) { $('pmCancel').click(); } };
+
+layoutSel.onchange = () => render(true);
+themeSel.onchange = () => render(true);
+
+editor.addEventListener('input', () => { setDirty(true); scheduleRender(); });
+editor.addEventListener('keydown', e => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const s = editor.selectionStart, t = editor.selectionEnd;
+    editor.setRangeText('  ', s, t, 'end');
+    setDirty(true);
+    scheduleRender();
+  }
+});
+
+document.addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey;
+  if (!mod) return;
+  const k = e.key.toLowerCase();
+  if (k === 's') { e.preventDefault(); e.shiftKey ? saveAs() : saveFile(); }
+  else if (k === 'o') { e.preventDefault(); openBrowser(); }
+});
+
+window.addEventListener('beforeunload', e => {
+  if (dirty) { e.preventDefault(); e.returnValue = ''; }
+});
+
+/* ---------------- 启动 ---------------- */
+
+const SAMPLE = `flowchart LR
+  subgraph S1["① 并行调研"]
+    A["调研·原理链路"]
+    C["调研·竞品拆解"]
+  end
+  A -->|raw/spec.md| B["核验"]
+  C -->|raw/peers.md| B
+  B --> D{"卡点① 大纲确认"}
+  D --> E["分镜"]
+  E --> F["成片"]
+  classDef gate fill:#ffe0e0,stroke:#c0392b,stroke-width:2px
+  class D gate`;
+
+(async function init() {
+  try { root = (await api('/api/root')).root || ''; } catch { /* 非 server 模式 */ }
+
+  const q = new URLSearchParams(location.search).get('file');
+  const last = localStorage.getItem(LS_PATH) || '';
+  const target = q || last;
+  let opened = false;
+
+  if (target) opened = await loadPath(target);
+  if (!opened) {
+    currentPath = '';
+    showPath('');
+    editor.value = SAMPLE;
+    lastRendered = null;
+    await render(true);
+    if (q) setStatus('打不开 ' + q, true, 8000);
+  }
+  editor.focus();
+})();
+</script>
+</body>
+</html>
